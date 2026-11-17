@@ -1,0 +1,561 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  T1 for CC Fall 2026 Assignment 3 (AI Photo Search). Creates both Lambdas (LF1 index-photos, LF2 search-photos),
+  the API Gateway REST API (GET /search, PUT /photos/{object} as an S3 proxy, API key + usage plan, CORS),
+  the frontend bucket B1 (public static website, URL in Outputs), the photos bucket B2 (PUT trigger to LF1),
+  and all IAM roles/policies. Optionally also creates the OpenSearch (ElasticSearch) domain.
+
+Parameters:
+  Suffix:
+    Type: String
+    Default: cf
+    AllowedPattern: "^[a-z0-9-]{2,12}$"
+    Description: Lowercase suffix used in resource names so this stack does not clash with resources made by hand.
+  CreateOpenSearchDomain:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "true creates a new t3.small OpenSearch domain (takes ~15 min, costs money). false reuses OpenSearchEndpoint."
+  OpenSearchEndpoint:
+    Type: String
+    Default: ""
+    Description: Existing domain endpoint (without https://), used when CreateOpenSearchDomain is false.
+  LexBotId:
+    Type: String
+    Default: ""
+    Description: Lex V2 bot ID of PhotoSearchBot.
+  LexBotAliasId:
+    Type: String
+    Default: TSTALIASID
+    Description: Lex V2 bot alias ID (TSTALIASID is the built in test alias).
+
+Conditions:
+  CreateOS: !Equals [!Ref CreateOpenSearchDomain, "true"]
+
+Resources:
+  # ------------------------------------------------------------------ S3 buckets
+  FrontendBucket:                       # B1
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "photo-album-frontend-${Suffix}-${AWS::AccountId}"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadForWebsite
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+
+  PhotosBucket:                         # B2 (private, photos served through presigned URLs)
+    Type: AWS::S3::Bucket
+    DependsOn: IndexFunctionS3Permission
+    Properties:
+      BucketName: !Sub "photo-album-photos-${Suffix}-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt IndexFunction.Arn
+          - Event: s3:ObjectRemoved:*
+            Function: !GetAtt IndexFunction.Arn
+
+  # ------------------------------------------------------------------ IAM
+  IndexFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - {Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: index-photos-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:aws:s3:::photo-album-photos-${Suffix}-${AWS::AccountId}/*"
+              - Effect: Allow
+                Action: rekognition:DetectLabels
+                Resource: "*"
+              - Effect: Allow
+                Action: [es:ESHttpHead, es:ESHttpGet, es:ESHttpPut, es:ESHttpPost, es:ESHttpDelete]
+                Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/*"
+
+  SearchFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - {Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: search-photos-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lex:RecognizeText
+                Resource: !Sub "arn:aws:lex:${AWS::Region}:${AWS::AccountId}:bot-alias/*"
+              - Effect: Allow
+                Action: [es:ESHttpGet, es:ESHttpPost]
+                Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/*"
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:aws:s3:::photo-album-photos-${Suffix}-${AWS::AccountId}/*"
+
+  ApiGatewayS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - {Effect: Allow, Principal: {Service: apigateway.amazonaws.com}, Action: sts:AssumeRole}
+      Policies:
+        - PolicyName: put-photos
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "arn:aws:s3:::photo-album-photos-${Suffix}-${AWS::AccountId}/*"
+
+  SiteHelperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - {Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: site-helper
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject, s3:ListBucket]
+                Resource:
+                  - !Sub "arn:aws:s3:::photo-album-frontend-${Suffix}-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::photo-album-frontend-${Suffix}-${AWS::AccountId}/*"
+                  - !Sub "arn:aws:s3:::photo-album-photos-${Suffix}-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::photo-album-photos-${Suffix}-${AWS::AccountId}/*"
+
+  # ------------------------------------------------------------------ OpenSearch (optional)
+  PhotosDomain:
+    Type: AWS::OpenSearchService::Domain
+    Condition: CreateOS
+    Properties:
+      DomainName: !Sub "photos-${Suffix}"
+      EngineVersion: Elasticsearch_7.10
+      ClusterConfig: {InstanceType: t3.small.search, InstanceCount: 1}
+      EBSOptions: {EBSEnabled: true, VolumeType: gp3, VolumeSize: 10}
+      DomainEndpointOptions: {EnforceHTTPS: true}
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: [!GetAtt IndexFunctionRole.Arn, !GetAtt SearchFunctionRole.Arn]
+            Action: es:ESHttp*
+            Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/photos-${Suffix}/*"
+
+  # ------------------------------------------------------------------ Lambdas (code inline, edit here to update)
+  IndexFunction:                        # LF1
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "index-photos-${Suffix}"
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt IndexFunctionRole.Arn
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !If [CreateOS, !GetAtt PhotosDomain.DomainEndpoint, !Ref OpenSearchEndpoint]
+      Code:
+        ZipFile: |
+          import json,os,re,hashlib,urllib.request,urllib.error
+          from urllib.parse import unquote_plus
+          import boto3
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          R=os.environ['AWS_REGION'];H=re.sub(r'^https?://','',os.environ.get('OPENSEARCH_ENDPOINT','')).rstrip('/');I='photos'
+          s3=boto3.client('s3');rk=boto3.client('rekognition');ses=boto3.Session()
+          M={'settings':{'number_of_shards':1,'number_of_replicas':0},'mappings':{'properties':{'objectKey':{'type':'keyword'},'bucket':{'type':'keyword'},'createdTimestamp':{'type':'date'},'labels':{'type':'text','analyzer':'english','fields':{'raw':{'type':'keyword'}}}}}}
+          def es(m,p,b=None):
+            u='https://'+H+p;d=json.dumps(b).encode() if b is not None else None
+            a=AWSRequest(method=m,url=u,data=d,headers={'Content-Type':'application/json'})
+            SigV4Auth(ses.get_credentials().get_frozen_credentials(),'es',R).add_auth(a)
+            try:
+              with urllib.request.urlopen(urllib.request.Request(u,data=d,method=m,headers=dict(a.headers.items())),timeout=15) as r:return r.status
+            except urllib.error.HTTPError as e:return e.code
+          def uniq(xs):
+            o=[]
+            for x in xs:
+              x=re.sub(r'\s+',' ',x or '').strip().lower()
+              if x and x not in o:o.append(x)
+            return o
+          def lambda_handler(event,context):
+            print(json.dumps(event))
+            if not H:raise Exception('OPENSEARCH_ENDPOINT not set')
+            if es('HEAD','/'+I)==404:es('PUT','/'+I,M)
+            for rec in event.get('Records',[]):
+              b=rec['s3']['bucket']['name'];k=unquote_plus(rec['s3']['object']['key'])
+              did=hashlib.sha1((b+'/'+k).encode()).hexdigest()
+              if rec.get('eventName','').startswith('ObjectRemoved'):
+                es('DELETE','/%s/_doc/%s'%(I,did));continue
+              if not k.lower().endswith(('.jpg','.jpeg','.png')):continue
+              h=s3.head_object(Bucket=b,Key=k)
+              meta={x.lower():y for x,y in h.get('Metadata',{}).items()}
+              labels=meta.get('customlabels','').split(',')
+              try:
+                for l in rk.detect_labels(Image={'S3Object':{'Bucket':b,'Name':k}},MaxLabels=50,MinConfidence=70)['Labels']:
+                  labels+=[l['Name']]+[p['Name'] for p in l.get('Parents',[])]
+              except (rk.exceptions.InvalidImageFormatException,rk.exceptions.ImageTooLargeException) as e:print(repr(e))
+              doc={'objectKey':k,'bucket':b,'createdTimestamp':h['LastModified'].strftime('%Y-%m-%dT%H:%M:%S'),'labels':uniq(labels)}
+              s=es('PUT','/%s/_doc/%s?refresh=true'%(I,did),doc)
+              print(s,json.dumps(doc))
+              if s>=300:raise Exception('indexing failed: HTTP %s'%s)
+            return {'statusCode':200}
+
+  SearchFunction:                       # LF2
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "search-photos-${Suffix}"
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt SearchFunctionRole.Arn
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !If [CreateOS, !GetAtt PhotosDomain.DomainEndpoint, !Ref OpenSearchEndpoint]
+          LEX_BOT_ID: !Ref LexBotId
+          LEX_BOT_ALIAS_ID: !Ref LexBotAliasId
+      Code:
+        ZipFile: |
+          import json,os,re,uuid,urllib.request,urllib.error
+          import boto3
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          from botocore.config import Config
+          R=os.environ['AWS_REGION'];H=re.sub(r'^https?://','',os.environ.get('OPENSEARCH_ENDPOINT','')).rstrip('/')
+          lex=boto3.client('lexv2-runtime');s3=boto3.client('s3',region_name=R,config=Config(signature_version='s3v4'));ses=boto3.Session()
+          STOP=set('a an the me show find search for of with in on them it photo photos picture pictures pic pics image images some any and or i want to see my'.split())
+          CORS={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'Content-Type,X-Api-Key,x-amz-meta-customLabels','Content-Type':'application/json'}
+          def out(c,b):return {'statusCode':c,'headers':CORS,'body':json.dumps(b)}
+          def es(p,b):
+            u='https://'+H+p;d=json.dumps(b).encode()
+            a=AWSRequest(method='POST',url=u,data=d,headers={'Content-Type':'application/json'})
+            SigV4Auth(ses.get_credentials().get_frozen_credentials(),'es',R).add_auth(a)
+            try:
+              with urllib.request.urlopen(urllib.request.Request(u,data=d,method='POST',headers=dict(a.headers.items())),timeout=10) as r:return json.loads(r.read())
+            except urllib.error.HTTPError as e:
+              if e.code==404:return {}
+              raise
+          def sing(w):
+            if w.endswith('ies') and len(w)>4:return w[:-3]+'y'
+            if w.endswith('s') and not w.endswith(('ss','us','is')) and len(w)>3:return w[:-1]
+            return w
+          def keywords(q):
+            r=lex.recognize_text(botId=os.environ['LEX_BOT_ID'],botAliasId=os.environ.get('LEX_BOT_ALIAS_ID','TSTALIASID'),localeId='en_US',sessionId=uuid.uuid4().hex,text=q)
+            it=(r.get('sessionState') or {}).get('intent') or {}
+            if it.get('name')!='SearchIntent':return []
+            ks=[]
+            for s in (it.get('slots') or {}).values():
+              v=(s or {}).get('value') or {}
+              for raw in (v.get('originalValue'),v.get('interpretedValue')):
+                for part in re.split(r',|\band\b|&',(raw or '').lower()):
+                  t=' '.join(w for w in re.findall(r"[a-z0-9']+",part) if w not in STOP)
+                  for x in (t,sing(t)):
+                    if x and x not in ks:ks.append(x)
+            return ks
+          def lambda_handler(event,context):
+            q=((event.get('queryStringParameters') or {}).get('q') or '').strip()[:1000]
+            if not q:return out(200,{'results':[]})
+            try:
+              ks=keywords(q);print(q,ks)
+              if not ks:return out(200,{'results':[]})
+              sh=[{'terms':{'labels.raw':ks}}]+[{'match':{'labels':{'query':k,'operator':'and'}}} for k in ks]
+              hits=es('/photos/_search',{'size':100,'query':{'bool':{'should':sh,'minimum_should_match':1}}}).get('hits',{}).get('hits',[])
+              res=[{'url':s3.generate_presigned_url('get_object',Params={'Bucket':h['_source']['bucket'],'Key':h['_source']['objectKey']},ExpiresIn=3600),'labels':h['_source'].get('labels',[])} for h in hits]
+              return out(200,{'results':res})
+            except Exception as e:
+              print(repr(e));return out(500,{'code':500,'message':str(e)})
+
+  IndexFunctionS3Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IndexFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:aws:s3:::photo-album-photos-${Suffix}-${AWS::AccountId}"
+
+  SearchFunctionApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SearchFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PhotoApi}/*/GET/search"
+
+  # ------------------------------------------------------------------ API Gateway
+  PhotoApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "AI Photo Search ${Suffix}"
+      Description: AI Photo Search API (GET /search, PUT /photos/{object})
+      EndpointConfiguration: {Types: [REGIONAL]}
+      BinaryMediaTypes: [image/jpeg, image/jpg, image/png]
+
+  SearchResource:
+    Type: AWS::ApiGateway::Resource
+    Properties: {RestApiId: !Ref PhotoApi, ParentId: !GetAtt PhotoApi.RootResourceId, PathPart: search}
+
+  PhotosResource:
+    Type: AWS::ApiGateway::Resource
+    Properties: {RestApiId: !Ref PhotoApi, ParentId: !GetAtt PhotoApi.RootResourceId, PathPart: photos}
+
+  PhotoObjectResource:
+    Type: AWS::ApiGateway::Resource
+    Properties: {RestApiId: !Ref PhotoApi, ParentId: !Ref PhotosResource, PathPart: "{object}"}
+
+  SearchGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PhotoApi
+      ResourceId: !Ref SearchResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      OperationName: searchPhotos
+      RequestParameters: {method.request.querystring.q: false}
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchFunction.Arn}/invocations"
+
+  PhotoPutMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PhotoApi
+      ResourceId: !Ref PhotoObjectResource
+      HttpMethod: PUT
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      OperationName: uploadPhoto
+      RequestParameters:
+        method.request.path.object: true
+        method.request.header.x-amz-meta-customLabels: false
+        method.request.header.Content-Type: false
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: PUT
+        Credentials: !GetAtt ApiGatewayS3Role.Arn
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:s3:path/photo-album-photos-${Suffix}-${AWS::AccountId}/{object}"
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestParameters:
+          integration.request.path.object: method.request.path.object
+          integration.request.header.x-amz-meta-customLabels: method.request.header.x-amz-meta-customLabels
+          integration.request.header.Content-Type: method.request.header.Content-Type
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters: {method.response.header.Access-Control-Allow-Origin: "'*'"}
+            ResponseTemplates: {application/json: '{"message": "Photo uploaded"}'}
+          - StatusCode: "400"
+            SelectionPattern: '4\d{2}'
+            ResponseParameters: {method.response.header.Access-Control-Allow-Origin: "'*'"}
+          - StatusCode: "500"
+            SelectionPattern: '5\d{2}'
+            ResponseParameters: {method.response.header.Access-Control-Allow-Origin: "'*'"}
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters: {method.response.header.Access-Control-Allow-Origin: true}
+        - StatusCode: "400"
+          ResponseParameters: {method.response.header.Access-Control-Allow-Origin: true}
+        - StatusCode: "500"
+          ResponseParameters: {method.response.header.Access-Control-Allow-Origin: true}
+
+  SearchOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PhotoApi
+      ResourceId: !Ref SearchResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false            # browsers never send the API key on preflight
+      Integration:
+        Type: MOCK
+        RequestTemplates: {application/json: '{"statusCode": 200}'}
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Api-Key,X-Amz-Date,Authorization,X-Amz-Security-Token,x-amz-meta-customLabels'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  PhotoOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PhotoApi
+      ResourceId: !Ref PhotoObjectResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        RequestTemplates: {application/json: '{"statusCode": 200}'}
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Api-Key,X-Amz-Date,Authorization,X-Amz-Security-Token,x-amz-meta-customLabels'"
+              method.response.header.Access-Control-Allow-Methods: "'PUT,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # CORS headers on API Gateway's own errors (missing API key, throttling, etc.)
+  Default4xxResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref PhotoApi
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Api-Key,x-amz-meta-customLabels'"
+
+  Default5xxResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref PhotoApi
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Api-Key,x-amz-meta-customLabels'"
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [SearchGetMethod, PhotoPutMethod, SearchOptionsMethod, PhotoOptionsMethod, Default4xxResponse, Default5xxResponse]
+    Properties:
+      RestApiId: !Ref PhotoApi
+      StageName: v1
+
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: ApiDeployment
+    Properties:
+      Name: !Sub "photo-album-key-${Suffix}"
+      Enabled: true
+
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: ApiDeployment
+    Properties:
+      UsagePlanName: !Sub "photo-album-plan-${Suffix}"
+      ApiStages: [{ApiId: !Ref PhotoApi, Stage: v1}]
+      Throttle: {RateLimit: 20, BurstLimit: 40}
+      Quota: {Limit: 10000, Period: MONTH}
+
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+  # ------------------------------------------------------------------ Site helper (custom resource)
+  # Writes a starter index.html so the website URL works right away, and empties both buckets
+  # on stack deletion so CloudFormation can delete them.
+  SiteHelperFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 120
+      Role: !GetAtt SiteHelperRole.Arn
+      Code:
+        ZipFile: |
+          import boto3,cfnresponse
+          s3=boto3.resource('s3')
+          PAGE='<!DOCTYPE html><html><head><meta charset="utf-8"><title>AI Photo Album</title></head><body style="font-family:sans-serif;max-width:640px;margin:40px auto"><h1>AI Photo Album</h1><p>Stack deployed. API: <code>{api}</code></p><p>Pipeline P2 replaces this page with the full frontend.</p></body></html>'
+          def handler(e,c):
+            p=e['ResourceProperties']
+            try:
+              if e['RequestType'] in ('Create','Update'):
+                s3.Object(p['FrontendBucket'],'index.html').put(Body=PAGE.replace('{api}',p['ApiUrl']),ContentType='text/html')
+              else:
+                for b in (p['FrontendBucket'],p['PhotosBucket']):
+                  try:s3.Bucket(b).objects.all().delete()
+                  except Exception as x:print(b,x)
+              cfnresponse.send(e,c,cfnresponse.SUCCESS,{})
+            except Exception as x:
+              print(x);cfnresponse.send(e,c,cfnresponse.FAILED,{'Error':str(x)})
+
+  SiteHelper:
+    Type: Custom::SiteHelper
+    DependsOn: FrontendBucketPolicy
+    Properties:
+      ServiceToken: !GetAtt SiteHelperFunction.Arn
+      FrontendBucket: !Ref FrontendBucket
+      PhotosBucket: !Ref PhotosBucket
+      ApiUrl: !Sub "https://${PhotoApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
+
+Outputs:
+  WebsiteURL:
+    Description: Public URL of the frontend (B1) static website
+    Value: !GetAtt FrontendBucket.WebsiteURL
+  ApiInvokeURL:
+    Description: Base URL of the deployed API (stage v1)
+    Value: !Sub "https://${PhotoApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
+  ApiKeyId:
+    Description: API key ID. Get the value with the command in GetApiKeyValue.
+    Value: !Ref ApiKey
+  GetApiKeyValue:
+    Value: !Sub "aws apigateway get-api-key --api-key ${ApiKey} --include-value --query value --output text"
+  PhotosBucketName:
+    Value: !Ref PhotosBucket
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+  IndexFunctionName:
+    Value: !Ref IndexFunction
+  SearchFunctionName:
+    Value: !Ref SearchFunction
+  OpenSearchEndpoint:
+    Value: !If [CreateOS, !GetAtt PhotosDomain.DomainEndpoint, !Ref OpenSearchEndpoint]
