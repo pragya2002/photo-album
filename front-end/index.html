@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Photo Album</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>AI Photo Album</h1>
+    <p class="sub">Search your photos in plain English, e.g. <em>"show me dogs and trees"</em></p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Search</h2>
+      <form id="search-form" autocomplete="off">
+        <input id="search-input" type="text" maxlength="500" placeholder="show me photos with cats and dogs" />
+        <button type="button" id="voice-btn" title="Search by voice" hidden>🎤</button>
+        <button type="submit" id="search-btn">Search</button>
+      </form>
+      <p id="search-status" class="status" role="status"></p>
+      <div id="results" class="grid"></div>
+    </section>
+
+    <section class="card">
+      <h2>Upload a photo</h2>
+      <form id="upload-form">
+        <label>Photo (JPEG or PNG, up to 10 MB)
+          <input id="file-input" type="file" accept="image/jpeg,image/png" required />
+        </label>
+        <img id="preview" alt="" hidden />
+        <label>Custom labels (optional, comma separated)
+          <input id="labels-input" type="text" maxlength="500" placeholder="Sam, Sally" />
+        </label>
+        <div id="label-chips" class="chips"></div>
+        <button type="submit" id="upload-btn">Upload</button>
+      </form>
+      <p id="upload-status" class="status" role="status"></p>
+    </section>
+  </main>
+
+  <!-- API Gateway generated JavaScript SDK (SDK1): unzip it into ./sdk -->
+  <script src="sdk/lib/axios/dist/axios.standalone.js"></script>
+  <script src="sdk/lib/CryptoJS/rollups/crypto-js.js"></script>
+  <script src="sdk/lib/CryptoJS/rollups/sha256.js"></script>
+  <script src="sdk/lib/CryptoJS/components/hmac.js"></script>
+  <script src="sdk/lib/CryptoJS/components/enc-base64.js"></script>
+  <script src="sdk/lib/url-template/url-template.js"></script>
+  <script src="sdk/lib/apiGatewayCore/sigV4Client.js"></script>
+  <script src="sdk/lib/apiGatewayCore/apiGatewayClient.js"></script>
+  <script src="sdk/lib/apiGatewayCore/simpleHttpClient.js"></script>
+  <script src="sdk/lib/apiGatewayCore/utils.js"></script>
+  <script src="sdk/apigClient.js"></script>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
