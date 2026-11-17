@@ -1,0 +1,16 @@
+# Pipeline P2 (frontend): runs when front-end/ changes in this repo.
+# Packages only the front-end folder; the pipeline's S3 deploy stage unzips it into the website bucket B1.
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - test -f front-end/index.html
+      - echo "Packaging front-end for S3"
+
+artifacts:
+  base-directory: front-end
+  files:
+    - '**/*'
+  exclude-paths:
+    - README.md

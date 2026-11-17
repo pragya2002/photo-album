@@ -1,4 +1,4 @@
-# Pipeline P1 (backend): runs on every push to the backend repo.
+# Pipeline P1 (backend): runs when lambda-functions/ changes in this repo.
 # Tests both Lambdas, zips them and deploys the new code to index-photos and search-photos.
 version: 0.2
 
@@ -15,11 +15,11 @@ phases:
       - pip install --quiet boto3 pytest
   pre_build:
     commands:
-      - python -m pytest -q tests
+      - python -m pytest -q lambda-functions/tests
   build:
     commands:
-      - (cd lambdas/index-photos && zip -qr ../../index-photos.zip .)
-      - (cd lambdas/search-photos && zip -qr ../../search-photos.zip .)
+      - (cd lambda-functions/index-photos && zip -qr ../../index-photos.zip .)
+      - (cd lambda-functions/search-photos && zip -qr ../../search-photos.zip .)
   post_build:
     commands:
       - aws lambda update-function-code --function-name "$INDEX_FUNCTION" --zip-file fileb://index-photos.zip --publish

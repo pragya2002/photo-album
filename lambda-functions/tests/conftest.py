@@ -11,7 +11,7 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 os.environ.setdefault("OPENSEARCH_ENDPOINT", "https://search-photos-test.us-east-1.es.amazonaws.com")
 os.environ.setdefault("LEX_BOT_ID", "TESTBOTID")
 
-ROOT = pathlib.Path(__file__).resolve().parents[1] / "lambdas"
+ROOT = pathlib.Path(__file__).resolve().parents[1]  # lambda-functions/
 
 
 def _load(name, folder):
