@@ -512,27 +512,36 @@ Resources:
       Role: !GetAtt SiteHelperRole.Arn
       Code:
         ZipFile: |
-          import boto3,cfnresponse
+          import boto3,json,urllib.request
           s3=boto3.resource('s3')
-          PAGE='<!DOCTYPE html><html><head><meta charset="utf-8"><title>AI Photo Album</title></head><body style="font-family:sans-serif;max-width:640px;margin:40px auto"><h1>AI Photo Album</h1><p>Stack deployed. API: <code>{api}</code></p><p>Pipeline P2 replaces this page with the full frontend.</p></body></html>'
+          PAGE='<html><head><title>AI Photo Album</title></head><body style="font-family:sans-serif;max-width:640px;margin:40px auto"><h1>AI Photo Album</h1><p>Stack deployed. API: API_URL</p><p>Pipeline P2 replaces this page with the full frontend.</p></body></html>'
+          def send(e,c,status,reason=''):
+            # report back to CloudFormation (cfnresponse is not bundled in newer Python runtimes)
+            body=json.dumps({'Status':status,'Reason':reason or 'See CloudWatch logs','PhysicalResourceId':e.get('PhysicalResourceId') or c.log_stream_name,'StackId':e['StackId'],'RequestId':e['RequestId'],'LogicalResourceId':e['LogicalResourceId'],'Data':{}}).encode()
+            urllib.request.urlopen(urllib.request.Request(e['ResponseURL'],data=body,method='PUT',headers={'Content-Type':''}),timeout=10)
           def handler(e,c):
+            print(json.dumps(e))
             p=e['ResourceProperties']
             try:
               if e['RequestType'] in ('Create','Update'):
-                s3.Object(p['FrontendBucket'],'index.html').put(Body=PAGE.replace('{api}',p['ApiUrl']),ContentType='text/html')
+                s3.Object(p['FrontendBucket'],'index.html').put(Body=PAGE.replace('API_URL',p['ApiUrl']),ContentType='text/html')
               else:
                 for b in (p['FrontendBucket'],p['PhotosBucket']):
-                  try:s3.Bucket(b).objects.all().delete()
-                  except Exception as x:print(b,x)
-              cfnresponse.send(e,c,cfnresponse.SUCCESS,{})
+                  try:
+                    s3.Bucket(b).objects.all().delete()
+                  except Exception as x:
+                    print(b,x)
+              send(e,c,'SUCCESS')
             except Exception as x:
-              print(x);cfnresponse.send(e,c,cfnresponse.FAILED,{'Error':str(x)})
+              print(x)
+              send(e,c,'FAILED',str(x))
 
   SiteHelper:
     Type: Custom::SiteHelper
     DependsOn: FrontendBucketPolicy
     Properties:
       ServiceToken: !GetAtt SiteHelperFunction.Arn
+      ServiceTimeout: 300
       FrontendBucket: !Ref FrontendBucket
       PhotosBucket: !Ref PhotosBucket
       ApiUrl: !Sub "https://${PhotoApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
