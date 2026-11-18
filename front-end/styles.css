@@ -23,3 +23,10 @@ figcaption { padding:8px; display:flex; flex-wrap:wrap; gap:4px; }
 .chip { padding:3px 9px; font-size:12px; border-radius:999px; background:#eef2ff; color:var(--accent); }
 .chip.static { cursor:default; }
 #preview { max-width:220px; border-radius:10px; }
+
+.site-footer {
+  text-align: center;
+  font-size: 0.85rem;
+  color: #6b7280;
+  padding: 1.5rem 0 2rem;
+}

@@ -244,4 +244,5 @@ def lambda_handler(event, context):
     except Exception as exc:
         logger.exception("Search failed")
         return error(500, f"Search failed: {exc}")
+    logger.info("Returning %d result(s) for keywords %s", len(results), keywords)
     return respond(200, {"results": results})
