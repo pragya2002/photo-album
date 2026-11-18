@@ -35,7 +35,7 @@ LEX_BOT_ID = os.environ.get("LEX_BOT_ID", "")
 LEX_BOT_ALIAS_ID = os.environ.get("LEX_BOT_ALIAS_ID", "TSTALIASID")
 LEX_LOCALE_ID = os.environ.get("LEX_LOCALE_ID", "en_US")
 SEARCH_INTENT = os.environ.get("SEARCH_INTENT", "SearchIntent")
-MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "100"))
+MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "50"))
 URL_EXPIRY = int(os.environ.get("URL_EXPIRY_SECONDS", "3600"))
 MAX_QUERY_LENGTH = 1000  # Lex RecognizeText accepts up to 1024 characters
 
