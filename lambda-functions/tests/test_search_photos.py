@@ -35,6 +35,19 @@ def test_disambiguate_two_slots(lf2, monkeypatch):
     assert lf2.disambiguate("show me cats and dogs") == ["cats", "cat", "dogs"]
 
 
+def test_disambiguate_adds_words_lex_left_out(lf2, monkeypatch):
+    slots = {"keywordOne": {"value": {"originalValue": "cats", "interpretedValue": "cats"}},
+             "keywordTwo": None}
+    monkeypatch.setattr(lf2.lex, "recognize_text", lambda **kw: _lex_reply("SearchIntent", slots))
+    assert lf2.disambiguate("show me portraits and cats") == ["cats", "portraits"]
+
+
+def test_disambiguate_search_intent_with_empty_slots(lf2, monkeypatch):
+    monkeypatch.setattr(lf2.lex, "recognize_text",
+                        lambda **kw: _lex_reply("SearchIntent", {"keywordOne": None, "keywordTwo": None}))
+    assert lf2.disambiguate("show me portraits") == ["portraits"]
+
+
 def test_disambiguate_fallback_intent_gives_no_keywords(lf2, monkeypatch):
     monkeypatch.setattr(lf2.lex, "recognize_text", lambda **kw: _lex_reply("FallbackIntent", {}))
     assert lf2.disambiguate("asdfgh") == []

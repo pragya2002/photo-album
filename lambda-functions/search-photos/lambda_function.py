@@ -62,7 +62,8 @@ IRREGULAR = {
 
 _boto_cfg = Config(retries={"max_attempts": 3, "mode": "standard"})
 _session = boto3.Session()
-lex = boto3.client("lexv2-runtime", config=_boto_cfg)
+# adaptive retries absorb Lex throttling when several searches arrive at once
+lex = boto3.client("lexv2-runtime", config=Config(retries={"max_attempts": 6, "mode": "adaptive"}))
 s3 = boto3.client("s3", region_name=REGION,
                   config=Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}))
 
@@ -143,6 +144,9 @@ def disambiguate(query):
     for slot in (intent.get("slots") or {}).values():
         for value in slot_values(slot):
             keywords.extend(clean_keyword(value))
+    # Lex matched SearchIntent but can leave a slot empty for words it was not trained on
+    # (e.g. "show me portraits"). Add the query's own keywords so no label is missed.
+    keywords.extend(clean_keyword(query))
     return dedupe(keywords)
 
 
